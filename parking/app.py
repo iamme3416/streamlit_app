@@ -5,6 +5,8 @@ import plotly.express as px
 import folium
 from streamlit_folium import st_folium
 import math
+import os
+import glob
 
 # 페이지 환경 설정
 st.set_page_config(
@@ -14,7 +16,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 사용자 정의 CSS (디자인 스타일링)
+# 사용자 정의 CSS
 st.markdown("""
 <style>
     .main-header {
@@ -35,32 +37,62 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 데이터 로딩 및 전처리 캐싱
+# 데이터 로딩 및 전처리 (경로 오류 자동 탐색 적용)
 @st.cache_data
 def load_data():
-    file_path = "서울시 공영주차장 안내 정보.csv"
+    filename = "서울시 공영주차장 안내 정보.csv"
+    
+    # 1. 파일 경로 유연하게 탐색
+    file_path = None
+    possible_paths = [
+        filename,
+        os.path.join(os.path.dirname(__file__), filename),
+        os.path.join(os.getcwd(), filename),
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            file_path = path
+            break
+            
+    # 위 경로에서 못 찾을 경우 실행 디렉토리 하위의 모든 csv 검색
+    if file_path is None:
+        csv_files = glob.glob("**/*.csv", recursive=True)
+        for csv_file in csv_files:
+            if "공영주차장" in csv_file or "서울시" in csv_file:
+                file_path = csv_file
+                break
+
+    if file_path is None or not os.path.exists(file_path):
+        st.error(f"❌ 데이터 파일('{filename}')을 찾을 수 없습니다. GitHub 저장소에 CSV 파일이 업로드되었는지 확인해주세요.")
+        st.stop()
+    
+    # 2. 인코딩 예외 처리하며 읽기
     try:
         df = pd.read_csv(file_path, encoding='cp949')
     except Exception:
-        df = pd.read_csv(file_path, encoding='utf-8')
+        try:
+            df = pd.read_csv(file_path, encoding='euc-kr')
+        except Exception:
+            df = pd.read_csv(file_path, encoding='utf-8')
     
-    # 주소에서 자치구 추출
+    # 주소에서 자치구 추출[cite: 1]
     df['자치구'] = df['주소'].astype(str).str.extract(r'([가-힣]+구)')
     df['자치구'] = df['자치구'].fillna('기타/미분류')
     
-    # 수치형 데이터 결측치 및 타입 변환
+    # 수치형 데이터 결측치 및 타입 변환[cite: 1]
     num_cols = ['기본 주차 요금', '기본 주차 시간(분 단위)', '추가 단위 요금', '추가 단위 시간(분 단위)', '일 최대 요금', '총 주차면', '월 정기권 금액', '위도', '경도']
     for col in num_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     
-    # 범주형 결측치 처리
+    # 범주형 결측치 처리[cite: 1]
     df['주차장 종류명'] = df['주차장 종류명'].fillna('미상')
     df['유무료구분명'] = df['유무료구분명'].fillna('정보없음')
     df['야간무료개방여부명'] = df['야간무료개방여부명'].fillna('정보없음')
     
     return df
 
-# 요금 계산 로직 함수
+# 요금 계산 로직 함수[cite: 1]
 def calculate_parking_fee(row, parking_minutes):
     if parking_minutes <= 0:
         return 0
@@ -89,29 +121,26 @@ def calculate_parking_fee(row, parking_minutes):
         
     return fee
 
-# 데이터 불러오기
+# 데이터 불러오기[cite: 1]
 df_raw = load_data()
 
-# 헤더
+# 헤더[cite: 1]
 st.markdown('<div class="main-header">🅿️ 서울시 공영주차장 스마트 안내 시스템</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">서울시 공영주차장 맞춤 검색, 지도 안내, 예상 요금 계산 및 최저가/랜덤 추천 서비스를 제공합니다.</div>', unsafe_allow_html=True)
 
-# 사이드바 : 조건 검색 필터
+# 사이드바 : 조건 검색 필터[cite: 1]
 st.sidebar.header("🔍 검색 및 필터 설정")
 
-# 1. 자치구 선택
 gu_list = ["전체"] + sorted([g for g in df_raw['자치구'].unique() if g != '기타/미분류']) + ["기타/미분류"]
 selected_gu = st.sidebar.selectbox("자치구 선택", gu_list)
 
-# 2. 검색어 입력
 search_kw = st.sidebar.text_input("주차장명 / 주소 검색", "").strip()
 
-# 3. 유무료 & 주차장 종류 필터
 fee_type = st.sidebar.multiselect("유/무료 구분", options=df_raw['유무료구분명'].unique(), default=df_raw['유무료구분명'].unique())
 parking_type = st.sidebar.multiselect("주차장 종류", options=df_raw['주차장 종류명'].unique(), default=df_raw['주차장 종류명'].unique())
 night_free = st.sidebar.checkbox("야간 무료 개방 주차장만 보기", value=False)
 
-# 필터링 적용
+# 필터링 적용[cite: 1]
 filtered_df = df_raw.copy()
 
 if selected_gu != "전체":
@@ -132,7 +161,7 @@ if parking_type:
 if night_free:
     filtered_df = filtered_df[filtered_df['야간무료개방여부명'].str.contains("개방", na=False) & ~filtered_df['야간무료개방여부명'].str.contains("미개방", na=False)]
 
-# 탭 구성
+# 탭 구성[cite: 1]
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📍 주차장 목록 & 지도", 
     "💰 요금 계산기 & 최저가 추천", 
@@ -142,7 +171,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ---------------------------------------------------------
-# TAB 1: 주차장 목록 & 지도
+# TAB 1: 주차장 목록 & 지도[cite: 1]
 # ---------------------------------------------------------
 with tab1:
     col1, col2, col3, col4 = st.columns(4)
@@ -166,7 +195,7 @@ with tab1:
         
         display_map_df = map_df.head(300)
         if len(map_df) > 300:
-            st.info(f"💡 지도 원활한 표시를 위해 상위 300개 위치만 표시합니다. (전체 {len(map_df)}개 위치 가능)")
+            st.info(f"💡 지도 원활한 표시를 위해 상위 300개 위치만 표시합니다. (전체 {len(map_df)}개 위치 등록됨)")
 
         for _, row in display_map_df.iterrows():
             popup_html = f"""
@@ -195,7 +224,7 @@ with tab1:
     st.dataframe(filtered_df[display_cols].reset_index(drop=True), use_container_width=True)
 
 # ---------------------------------------------------------
-# TAB 2: 요금 계산기 & 최저가 추천
+# TAB 2: 요금 계산기 & 최저가 추천[cite: 1]
 # ---------------------------------------------------------
 with tab2:
     st.subheader("💡 이용시간 기준 예상 주차요금 계산 및 최저가 추천")
@@ -240,7 +269,7 @@ with tab2:
                 st.warning("조건에 해당하는 주차장 정보가 없습니다.")
 
 # ---------------------------------------------------------
-# TAB 3: 랜덤 주차장 추천
+# TAB 3: 랜덤 주차장 추천[cite: 1]
 # ---------------------------------------------------------
 with tab3:
     st.subheader("🎲 행운의 랜덤 주차장 추천")
@@ -283,7 +312,7 @@ with tab3:
             """)
 
 # ---------------------------------------------------------
-# TAB 4: 통계 및 시각화
+# TAB 4: 통계 및 시각화[cite: 1]
 # ---------------------------------------------------------
 with tab4:
     st.subheader("📊 서울시 공영주차장 데이터 분석")
@@ -317,7 +346,7 @@ with tab4:
         st.plotly_chart(fig4, use_container_width=True)
 
 # ---------------------------------------------------------
-# TAB 5: 데이터 다운로드
+# TAB 5: 데이터 다운로드[cite: 1]
 # ---------------------------------------------------------
 with tab5:
     st.subheader("📥 검색 및 필터링된 데이터 다운로드")
